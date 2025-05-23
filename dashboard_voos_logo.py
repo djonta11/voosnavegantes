@@ -1,97 +1,94 @@
-
-import requests
-import pandas as pd
 import streamlit as st
-from datetime import datetime
+import requests
+from datetime import datetime, timedelta
+import pandas as pd
 
 API_KEY = "d5a175d200msh7597c677f3cf9d5p12898ejsn804510a4ece6"
 HEADERS = {
     "x-rapidapi-host": "aerodatabox.p.rapidapi.com",
     "x-rapidapi-key": API_KEY
 }
-ICAO = "SBNF"
-today = datetime.utcnow()
-start = today.strftime("%Y-%m-%dT00:00")
-end = today.strftime("%Y-%m-%dT23:59")
-url = f"https://aerodatabox.p.rapidapi.com/airports/icao/{ICAO}/flights/{start}/{end}"
 
-@st.cache_data
-def get_flight_data():
-    response = requests.get(url, headers=HEADERS)
-    data = response.json()
+ICAO = "SBNF"  # Aeroporto de Navegantes
 
-    def normalize_flights(flight_list, tipo):
-        if not flight_list:
-            return pd.DataFrame()
-        df = pd.json_normalize(flight_list)
-        df["tipo"] = tipo
-        return df
+st.set_page_config(page_title="Voos Navegantes", layout="wide")
 
-    df_arr = normalize_flights(data.get("arrivals", []), "Chegada")
-    df_dep = normalize_flights(data.get("departures", []), "Partida")
+st.title("Dashboard Voos Aeroporto de Navegantes (SBNF)")
 
-    return pd.concat([df_arr, df_dep], ignore_index=True)
+# Interface do usuário
+col1, col2 = st.columns(2)
+with col1:
+    filtro_voo = st.selectbox("Tipo de voo:", ["Chegadas", "Partidas"])
+with col2:
+    mostrar_json = st.checkbox("Mostrar dados brutos (JSON) para debug")
 
-@st.cache_data
-def get_logo_url(airline_name):
-    try:
-        domain = airline_name.lower().replace(" ", "") + ".com"
-        return f"https://logo.clearbit.com/{domain}"
-    except:
-        return ""
+# Datas ampliadas para 3 dias (hoje -1 a hoje +1)
+hoje = datetime.utcnow()
+start_date = (hoje - timedelta(days=1)).strftime("%Y-%m-%dT00:00")
+end_date = (hoje + timedelta(days=1)).strftime("%Y-%m-%dT23:59")
 
-st.set_page_config(layout="wide", page_title="Dashboard Aeroporto Navegantes")
-st.title("✈️ Dashboard de Voos – Aeroporto de Navegantes (SBNF)")
+url = f"https://aerodatabox.p.rapidapi.com/airports/icao/{ICAO}/flights/{start_date}/{end_date}"
 
-try:
-    df = get_flight_data()
-except Exception as e:
-    st.error(f"Erro ao carregar dados: {e}")
+response = requests.get(url, headers=HEADERS)
+
+if response.status_code != 200:
+    st.error(f"Erro na API: {response.status_code}")
     st.stop()
+
+data = response.json()
+
+if mostrar_json:
+    st.subheader("Dados brutos da API")
+    st.write(data)
+
+voos = data.get("arrivals") if filtro_voo == "Chegadas" else data.get("departures")
+
+if not voos:
+    st.warning(f"Nenhum voo encontrado para '{filtro_voo}' no período selecionado.")
+    st.stop()
+
+# Construir dataframe
+rows = []
+for voo in voos:
+    try:
+        rows.append({
+            "Número": voo.get("flight", {}).get("number", "N/A"),
+            "Origem" if filtro_voo == "Chegadas" else "Destino": voo.get("departure", {}).get("iataCode", "N/A") if filtro_voo == "Chegadas" else voo.get("arrival", {}).get("iataCode", "N/A"),
+            "Companhia": voo.get("flight", {}).get("iataNumber", "N/A")[:2],
+            "Status": voo.get("status", "N/A"),
+            "Horário Previsto": voo.get("arrival", {}).get("scheduledTimeLocal", "N/A") if filtro_voo == "Chegadas" else voo.get("departure", {}).get("scheduledTimeLocal", "N/A")
+        })
+    except Exception as e:
+        pass
+
+df = pd.DataFrame(rows)
 
 if df.empty:
-    st.warning("Nenhum dado de voo encontrado para hoje.")
+    st.warning("Nenhum dado estruturado disponível para exibir.")
     st.stop()
 
-required_columns = ["flight.number", "airline.name", "status", "departure.scheduledTimeUtc"]
-for col in required_columns:
-    if col not in df.columns:
-        df[col] = None
+# Exibir dataframe
+st.dataframe(df)
 
-df["flight.number"] = df["flight.number"].fillna("Desconhecido")
-df["airline.name"] = df["airline.name"].fillna("Indefinida")
-df["status"] = df["status"].fillna("Desconhecido")
+# Mostrar logos simples das companhias
+st.subheader("Logotipos das companhias aéreas")
 
-df["departure.scheduledTimeUtc"] = pd.to_datetime(df["departure.scheduledTimeUtc"], errors="coerce")
-df["local_time"] = df["departure.scheduledTimeUtc"].dt.tz_localize("UTC").dt.tz_convert("America/Sao_Paulo")
-df["logo_url"] = df["airline.name"].apply(get_logo_url)
+# URLs básicas para logotipos (exemplo)
+logos = {
+    "AZ": "https://upload.wikimedia.org/wikipedia/commons/thumb/7/7e/Azul_Airlines_logo.svg/120px-Azul_Airlines_logo.svg.png",
+    "G3": "https://upload.wikimedia.org/wikipedia/commons/thumb/7/75/Gol_Logotipo.svg/120px-Gol_Logotipo.svg.png",
+    "JJ": "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e0/Airlines_Brasil_Jet.svg/120px-Airlines_Brasil_Jet.svg.png",
+    "AD": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c3/Air_Asia_Logo.svg/120px-Air_Asia_Logo.svg.png",
+}
 
-tipo = st.selectbox("Selecionar tipo de voo:", ["Todos", "Chegada", "Partida"])
-companhia = st.multiselect("Filtrar por companhia aérea:", sorted(df["airline.name"].unique()))
+comp_ativos = df["Companhia"].unique()
+cols = st.columns(len(comp_ativos))
 
-df_filtered = df.copy()
-if tipo != "Todos":
-    df_filtered = df_filtered[df_filtered["tipo"] == tipo]
-if companhia:
-    df_filtered = df_filtered[df_filtered["airline.name"].isin(companhia)]
-
-st.subheader("📋 Tabela de voos com logotipo")
-for _, row in df_filtered.iterrows():
-    cols = st.columns([1, 2, 2, 2, 2])
-    with cols[0]:
-        st.image(row["logo_url"], width=40)
-    with cols[1]:
-        st.markdown(f"**{row['airline.name']}**")
-    with cols[2]:
-        st.markdown(f"Voo: `{row['flight.number']}`")
-    with cols[3]:
-        st.markdown(f"Status: `{row['status']}`")
-    with cols[4]:
-        hora = row["local_time"].strftime('%H:%M') if pd.notnull(row["local_time"]) else "N/A"
-        st.markdown(f"🕒 {hora}")
-
-st.subheader("📈 Distribuição de status dos voos")
-st.bar_chart(df_filtered["status"].value_counts())
-
-st.subheader("🏢 Voos por companhia aérea")
-st.bar_chart(df_filtered["airline.name"].value_counts())
+for idx, comp in enumerate(comp_ativos):
+    url_logo = logos.get(comp, None)
+    with cols[idx]:
+        st.write(f"**{comp}**")
+        if url_logo:
+            st.image(url_logo, width=80)
+        else:
+            st.write("Logo não disponível")
